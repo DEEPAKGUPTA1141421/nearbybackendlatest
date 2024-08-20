@@ -3,255 +3,326 @@ const Shop = require("../models/shop");
 const Track = require("../models/tracking");
 const Order = require("../models/order");
 const Product=require("../models/product");
-const customResponse = (message, success, res) => {
-  res.status(400).json({
-    success: success,
-    message: message,
-  });
-};
+const driver = require("../config/neo4j");
 module.exports.gettopshop=async(req,res,next)=>{
-  try{
-    const shop=await Shop.find({}).limit(5);
-    if(!shop){
-      next(new customError("shop not found",404));
-    }
-    else{
-      res.status(200).json({
-        success:true,
-        message:"get top shop",
-        shop:shop
+  const userId = req.user.elementId;
+  const session=await driver.session();
+  try {
+    const otp = Math.floor(100000 + Math.random() * 900000);
+    let userotpExpires = Date.now() + 5 * 60 * 1000;
+    const otpNode=await session.run(`
+      CREATE (o:Otp {
+      otp:$otp,
+      userId:$userId,
+      userotpExpires:$userotpExpires
       })
-    }
-  }
-  catch(err){
-    next(new customError("shop not found",404));
+      RETURN o
+      `,{
+        otp,
+        userId,
+        userotpExpires
+      });
+    res.status(200).json({
+      success: true,
+      message: "OTP Sent Successfully",
+      otp: otpNode.records[0].get('o').properties,
+    });
+  } catch (err) {
+    next(new customError(err.message, 500));
   }
 }
-
 module.exports.createShop = async (req, res, next) => {
-  let data = req.body;
-  const user=req.user._id;
-  console.log(req.body);
-  try {
-    const shop = await Shop.findOne({ email:req.body.email });
+  const data = req.body;
+  const userId = req.user.elementId;
+  const session = driver.session();
 
-    if (shop) {
-      customResponse("Shop already exists", false, res);
+  try {
+    // Check if shop already exists
+    const result = await session.run(
+      `
+        MATCH (u:User)
+        WHERE elementId(u) = $id
+        RETURN u
+        `,
+      { id:userId }
+    );
+    let userNode;
+    if (result.records.length > 0) {
+       userNode = result.records[0].get("u");
     } else {
-      console.log(req.body.shopname)
-      const shopCreated = await Shop.create({
-        shopname: req.body.shopname,
-        ownername: req.body.ownername,
-        email: req.body.email,
-        contactNumber: req.body.contactNumber,
-        aadharCard: req.body.aadharCard,
-        address: {
-            state: req.body.state,
-            city: req.body.city,
-            district: req.body.district,
-            postalCode: req.body.postalCode
-        },
-        latitude: req.body.latitude,
-        longitude: req.body.longitude,
-        category: req.body.category,
-        location: req.body.location,
-        user:user
-    });
+      next(new customError("Invalid credentials", 401));
+    }
+    const existingShop = await session.run(
+      `
+      MATCH (s:Shop {email: $email})
+      RETURN s
+      `,
+      { email: userNode.properties.email}
+    );
+
+    if (existingShop.records.length > 0) {
+      res.status(400).json({
+        success: false,
+        message: "Shop already exists"
+      });
+    } else {
+      // Create the shop node
+      const result = await session.run(
+        `
+        CREATE (s:Shop {
+          shopname: $shopname,
+          ownername: $ownername,
+          email: $email,
+          contactNumber: $contactNumber,
+          aadharCard: $aadharCard,
+          state: $state,
+          city: $city,
+          district: $district,
+          postalCode: $postalCode,
+          location: point({ latitude: $latitude, longitude: $longitude }),
+          category: $category,
+          createdAt: timestamp()
+        })
+        RETURN s
+        `,
+        {
+          shopname: data.shopname,
+          ownername: data.ownername,
+          email:userNode.properties.email,
+          contactNumber: data.contactNumber,
+          aadharCard: data.aadharCard,
+          state: data.state,
+          city: data.city,
+          district: data.district,
+          postalCode: data.postalCode,
+          latitude: data.latitude,
+          longitude: data.longitude,
+          category: data.category
+        }
+      );
+
+      const shop = result.records[0].get('s').properties;
+      
       res.status(200).json({
         success: true,
         message: "Shop created successfully",
-        shopCreated,
+        shop
       });
     }
   } catch (err) {
     next(new customError(err.message, 404));
+  } finally {
+    await session.close();
   }
 };
+
 module.exports.getshopInfo = async (req, res, next) => {
-  const id = req.user._id;
-  console.log(id);
+  const userId = req.user.elementId;
+  const session = driver.session();
+
   try {
-    const shop = await Shop.find({user:id});
-    if (!shop) {
-      customResponse("shop Not Found", false, res);
+    // Check if shop already exists
+    const result = await session.run(
+      `
+        MATCH (u:User)
+        WHERE elementId(u) = $id
+        RETURN u
+        `,
+      { id:userId }
+    );
+    let userNode;
+    if (result.records.length >0) {
+       userNode = result.records[0].get("u");
     } else {
+      next(new customError("Invalid credentials", 401));
+    }
+  try {
+    const result = await session.run(
+      `
+      MATCH (s:Shop {email: $email})
+      RETURN s
+      `,
+      { email:userNode.properties.email }
+    );
+
+    const shopRecord = result.records[0];
+
+    if (!shopRecord) {
+      res.status(404).json({
+        success: false,
+        message: "Shop not found",
+      });
+    } else {
+      const shop = shopRecord.get('s');
       res.status(200).json({
         success: true,
-        message: "shop Found Succesfully",
-        shop: shop,
+        message: "Shop found successfully",
+        shop,
       });
     }
   } catch (err) {
+    next(new customError(err.message, 404));
+  } finally {
+    await session.close();
+  }
+  }
+   catch (err) {
     next(new customError(err.message, 404));
   }
 };
 
 module.exports.updateShopInfo = async (req, res, next) => {
-  console.log("inside updateShopInfo");
+  const data = req.body;
+  const session = driver.session();
+  const userId = req.user.elementId;
   try {
-    const id = req.params.id;
-    const data = req.body;
-    const { postalCode, state, district, city } = data;
-    data.address = { state, city, district, postalCode };
-    console.log("data is ", data);
-    const updateshop = await Shop.findByIdAndUpdate(id, data, { new: true });
-    if (!updateshop) {
-      customResponse("Update Product Failed", 400, res);
+    const user = await session.run(
+      `
+        MATCH (u:User)
+        WHERE elementId(u) = $id
+        RETURN u
+        `,
+      { id:userId }
+    );
+    let userNode;
+    if (user.records.length >0) {
+       userNode = user.records[0].get("u");
     } else {
+      next(new customError("Invalid credentials", 401));
+    }
+    let setClause = '';
+    const params = { email:userNode.properties.email};
+
+    if (data.shopname) {
+      setClause += 's.shopname = $shopname, ';
+      params.shopname = data.shopname;
+    }
+    if (data.ownername) {
+      setClause += 's.ownername = $ownername, ';
+      params.ownername = data.ownername;
+    }
+    if (data.contactNumber) {
+      setClause += 's.contactNumber = $contactNumber, ';
+      params.contactNumber = data.contactNumber;
+    }
+    if (data.aadharCard) {
+      setClause += 's.aadharCard = $aadharCard, ';
+      params.aadharCard = data.aadharCard;
+    }
+    if (data.state) {
+      setClause += 's.state = $state, ';
+      params.state = data.state;
+    }
+    if (data.city) {
+      setClause += 's.city = $city, ';
+      params.city = data.city;
+    }
+    if (data.district) {
+      setClause += 's.district = $district, ';
+      params.district = data.district;
+    }
+    if (data.postalCode) {
+      setClause += 's.postalCode = $postalCode, ';
+      params.postalCode = data.postalCode;
+    }
+    if (data.latitude) {
+      setClause += 's.latitude = $latitude, ';
+      params.latitude = data.latitude;
+    }
+    if (data.longitude) {
+      setClause += 's.longitude = $longitude, ';
+      params.longitude = data.longitude;
+    }
+    if (data.category) {
+      setClause += 's.category = $category, ';
+      params.category = data.category;
+    }
+    if (data.location) {
+      setClause += 's.location = $location, ';
+      params.location = data.location;
+    }
+
+    // Remove trailing comma and space
+    setClause = setClause.slice(0, -2);
+
+    const result = await session.run(
+      `
+      MATCH (s:Shop {email: $email})
+      SET ${setClause}
+      RETURN s
+      `,
+      params
+    );
+
+    const shopRecord = result.records[0];
+
+    if (!shopRecord) {
+      res.status(400).json({
+        success: false,
+        message: "Update shop failed",
+      });
+    } else {
+      const shop = shopRecord.get('s');
       res.status(200).json({
         success: true,
-        message: "shop Updated Succesful",
-        shop: updateshop,
+        message: "Shop updated successfully",
+        shop,
       });
     }
   } catch (error) {
-    next(customError(error.message, 500));
+    next(new customError(error.message, 500));
+  } finally {
+    await session.close();
   }
 };
-
-module.exports.getAllProduct = async (req, res, next) => {
-  try {
-      const id = req.user._id;
-    //  const {id}=req.params;
-    console.log("id",id);
-    const queryobj = req.query;
-    console.log(queryobj);
-    const query = {};
-    const sortingObj = {};
-    if (queryobj.subcategory) {
-      query.subcategory = queryobj.subcategory;
-    }
-    if (queryobj.category) {
-      query.category = queryobj.category;
-    }
-    if (queryobj.rating) {
-      query.rating = { $gte: parseFloat(queryobj.rating) };
-    }
-    if (queryobj.from && queryobj.to) {
-      query.price = {
-        $lte: parseFloat(queryobj.to),
-        $gte: parseFloat(queryobj.from),
-      };
-    } else if (queryobj.from) {
-      query.price = { $gte: parseFloat(queryobj.from) };
-    } else if (queryobj.to) {
-      query.price = { $lte: parseFloat(queryobj.to) };
-    }
-    if (queryobj.sortOnsellingPrice) {
-      sortingObj.sellingPrice = queryobj.sortOnsellingPrice === "asc" ? 1 : -1;
-    }
-    if (queryobj.sortOnrating) {
-      sortingObj.rating = queryobj.sortOnrating === "asc" ? 1 : -1;
-    }
-    const shopId = await Shop.findOne({user:id}).populate("productId").exec();
-    console.log("shop",shopId);
-    const productIds = shopId.productId.map((product) => product._id);
-    const productToReturn = await Product.find({
-      _id: { $in: productIds},
-      ...query,
-    }).sort({ ...sortingObj });
-    console.log("productsIds",productIds);
-    res.status(200).json({
-      count:productToReturn.length,
-      success: true,
-      message: "get all Product Of Shop",
-      productToReturn: productToReturn,
-    });
-  } catch (err) {
-    next(new customError(err.message, 404));
-  }
-};
-
-module.exports.ordersPlaced = async (req, res, next) => {
-  let shopId = req.params.id;
-  try {
-    const orders = await Order.find()
-      .populate({ path: "orderItems.product" })
-      .exec();
-
-    const matchedProducts = [];
-    for (let i = 0; i < orders.length; i++) {
-      const orderItems = orders[i].orderItems;
-      for (let j = 0; j < orderItems.length; j++) {
-        if (orderItems[j].product.shopId.toString() === shopId) {
-          matchedProducts.push(orderItems[j]);
-        }
-      }
-    }
-
-    if (matchedProducts.length == 0) {
-      next(new customError("No order placed from your shop", 400));
-    } else {
-      res.status(200).json({
-        success: true,
-        matchedProducts,
-      });
-    }
-  } catch (err) {
-    next(
-      new customError("Not able to fetch orders placed from your shop", 400)
-    );
-  }
-};
-
-module.exports.createOtp = async (req, res, next) => {
-  const id = req.params.id;
-  try {
-    const otp = Math.floor(100000 + Math.random() * 900000);
-    const trackId = await Track.findById(id);
-    trackId.sellerotp = otp;
-    trackId.sellerotpExpires = Date.now() + 5 * 60 * 1000;
-    await trackId.save();
-    res.status(200).json({
-      success: true,
-      message: "OTP Sent Successfully",
-      trackId: trackId,
-    });
-  } catch (err) {
-    next(new customError(err.message, 500));
-  }
-};
-
 module.exports.getAllOrderOfShop = async (req, res, next) => {
+  const shopId = req.params.id;
+  console.log(shopId);
+  const session = driver.session();
   try {
-    const shopId = req.params.shopid;
-    const order = await Order.find({}) // Find all orders
-      .populate({
-        path: "orderItems.product",
-      })
-      .exec();
-    if (!order) {
+    const order = await session.run(`
+      MATCH (s:Shop)-[r:order_list_shop]->(o:Order)
+      WHERE elementId(s)=$shopId
+      RETURN o
+      `,{
+        shopId:shopId
+      });
+    console.log(order);  
+    const allorder=[];  
+    for(let i=0;i<order.records.length;i++){
+      const productid=order.records[i].get('o').properties.productId;
+      const product=await session.run(`
+        MATCH (p:Product)
+        where elementId(p)=$productid
+        RETURN p
+        `,{
+          productid
+        })
+        allorder.push(product.records[0].get('p').properties)
+    }
+    if (allorder.length==-0) {
       next(new customError("No Order Is Found For this shop", 501));
     } else {
-      const matchedProducts = order.flatMap((orders) =>
-        orders.orderItems.filter(
-          (item) => item.product.shopId.toString() === shopId
-        )
-      );
-      if (matchedProducts.length == 0) {
-        next(new customError("No orders placed currently from your shop", 400));
-      } else {
         res.status(200).json({
           success: true,
           message: "All the Orders",
-          order: matchedProducts,
+          order:allorder,
         });
-      }
     }
   } catch (err) {
     next(new customError(err.message, 403));
+  }
+  finally{
+    await session.close();
   }
 };
 module.exports.bestshop=async(req,res,next)=>{
   try{
     const order=await Order.find().populate("orderItems.product").exec();
     const shopMap = new Map();
-    console.log(order[0].orderItems[0].name);
     for(let i=0;i<order.length;i++){
-      console.log(i);
       for(let j=0;j<order[i].orderItems[j].length;j++){
         if(shopMap.has(order[i].orderItems[j].product.shopId)){
-          console.log(1);
           shopMap.set(order[i].orderItems[j].product.shopId,shopMap.get(order[i].orderItems[j].product.shopId)+1);
         }
         else{
@@ -262,7 +333,6 @@ module.exports.bestshop=async(req,res,next)=>{
     const pairsArray = [];
     const countorder=[];
     for (const [shopId, value] of shopMap.entries()) {
-        console.log(shopId,value);
         pairsArray.push([value, shopId]);
     }
 
@@ -282,63 +352,93 @@ module.exports.bestshop=async(req,res,next)=>{
   }
 }
 module.exports.getAllProductForUser=async(req,res,next)=>{
-  try {
-  const {id}=req.params;
-  console.log("id",id);
+  const session = await driver.session();
   const queryobj = req.query;
-  console.log(queryobj);
-  const query = {};
-  const sortingObj = {};
-  if (queryobj.subcategory) {
-    query.subcategory = queryobj.subcategory;
+  const page = parseInt(queryobj.page) || parseInt(1);
+  const limit = parseInt(queryobj.limit) || parseInt(10);
+  const skip = (page - 1) * limit;
+
+  try {
+    // Build the WHERE clause for filtering
+    let whereClause = [];
+    if (queryobj.subcategory) {
+      whereClause.push(`p.subcategory = '${queryobj.subcategory}'`);
+    }
+    if (queryobj.genderSpecific) {
+      whereClause.push(`p.genderSpecific = '${queryobj.genderSpecific}'`);
+    }
+    if (queryobj.stock) {
+      whereClause.push(`p.stock >= ${parseFloat(queryobj.stock)}`);
+    }
+    if (queryobj.category) {
+      whereClause.push(`p.category = '${queryobj.category}'`);
+    }
+    if (queryobj.name) {
+      whereClause.push(`toLower(p.name) =~ '(?i).*${queryobj.name}.*'`);
+    }
+    if (queryobj.description) {
+      whereClause.push(`toLower(p.description) =~ '(?i).*${queryobj.description}.*'`);
+    }
+    if (queryobj.from && queryobj.to) {
+      whereClause.push(`p.sellingPrice >= ${parseFloat(queryobj.from)} AND p.sellingPrice <= ${parseFloat(queryobj.to)}`);
+    } else if (queryobj.from) {
+      whereClause.push(`p.sellingPrice >= ${parseFloat(queryobj.from)}`);
+    } else if (queryobj.to) {
+      whereClause.push(`p.sellingPrice <= ${parseFloat(queryobj.to)}`);
+    }
+    whereClause = whereClause.length > 0 ? `WHERE ${whereClause.join(' AND ')}` : '';
+
+    // Build the ORDER BY clause for sorting
+    let orderByClause = [];
+    if (queryobj.sortOnsellingPrice) {
+      orderByClause.push(`p.sellingPrice ${queryobj.sortOnsellingPrice === 'asc' ? 'ASC' : 'DESC'}`);
+    }
+    if (queryobj.sortOnrating) {
+      orderByClause.push(`p.rating ${queryobj.sortOnrating === 'asc' ? 'ASC' : 'DESC'}`);
+    }
+    orderByClause = orderByClause.length > 0 ? `ORDER BY ${orderByClause.join(', ')}` : '';
+
+    // Cypher query to find products based on filters and sorting
+    const cypherQuery = `
+      MATCH (p:Product)
+      ${whereClause}
+      ${orderByClause}
+      RETURN p
+    `;
+
+    const result = await session.run(cypherQuery);
+
+    const products = result.records.map(record => record.get('p').properties);
+
+    // Get the total count for pagination info
+    const countQuery = `
+      MATCH (p:Product)
+      ${whereClause}
+      RETURN COUNT(p) AS totalCount
+    `;
+    const countResult = await session.run(countQuery);
+    const totalCount = countResult.records[0].get('totalCount').toInt();
+    const totalPages = Math.ceil(totalCount / limit);
+
+    res.status(200).json({
+      count: products.length,
+      totalCount: totalCount,
+      totalPages: totalPages,
+      currentPage: page,
+      success: true,
+      message: "Get different types of products",
+      products: products
+    });
+  } catch (err) {
+    next(new customError(err.message, 404));
+  } finally {
+    session.close();
   }
-  if (queryobj.category) {
-    query.category = queryobj.category;
-  }
-  if (queryobj.rating) {
-    query.rating = { $gte: parseFloat(queryobj.rating) };
-  }
-  if (queryobj.from && queryobj.to) {
-    query.price = {
-      $lte: parseFloat(queryobj.to),
-      $gte: parseFloat(queryobj.from),
-    };
-  } else if (queryobj.from) {
-    query.price = { $gte: parseFloat(queryobj.from) };
-  } else if (queryobj.to) {
-    query.price = { $lte: parseFloat(queryobj.to) };
-  }
-  if (queryobj.sortOnsellingPrice) {
-    sortingObj.sellingPrice = queryobj.sortOnsellingPrice === "asc" ? 1 : -1;
-  }
-  if (queryobj.sortOnrating) {
-    sortingObj.rating = queryobj.sortOnrating === "asc" ? 1 : -1;
-  }
-  const shopId = await Shop.findById(id).populate("productId").exec();
-  console.log("shop",shopId);
-  const productIds = shopId.productId.map((product) => product._id);
-  const productToReturn = await Product.find({
-    _id: { $in: productIds},
-    ...query,
-  }).sort({ ...sortingObj });
-  console.log("productsIds",productIds);
-  res.status(200).json({
-    count:productToReturn.length,
-    success: true,
-    message: "get all Product Of Shop",
-    productToReturn: productToReturn,
-    nameofShop:shopId.shopname
-  });
-} catch (err) {
-  next(new customError(err.message, 404));
-}
 }
 module.exports.getAllShopOfCity=async(req,res,next)=>{
   const {city}=req.params;
-  console.log("city",city);
   try{
     const shoplist = await Shop.find({ location: { $regex: new RegExp(city, 'i') } });
-    console.log(shoplist);
     if(shoplist){
       res.status(200).json({
         message:"Get All The Shop",
@@ -351,3 +451,63 @@ module.exports.getAllShopOfCity=async(req,res,next)=>{
     next(new customError(err.message,404));
   }
 }
+module.exports.getAllProduct = async (req, res, next) => {
+  const session = await driver.session();
+  const {emailshop} = req.body; // Assuming user ID is stored here
+  const queryobj = req.query;
+
+  try {
+    // Build the WHERE clause for filtering
+    let whereClause = [];
+    if (queryobj.subcategory) {
+      whereClause.push(`p.subcategory = '${queryobj.subcategory}'`);
+    }
+    if (queryobj.category) {
+      whereClause.push(`p.category = '${queryobj.category}'`);
+    }
+    if (queryobj.name) {
+      whereClause.push(`toLower(p.name) =~ '(?i).*${queryobj.name}.*'`);
+    }
+    if (queryobj.description) {
+      whereClause.push(`toLower(p.description) =~ '(?i).*${queryobj.description}.*'`);
+    }
+    if (queryobj.from && queryobj.to) {
+      whereClause.push(`p.sellingPrice >= ${parseFloat(queryobj.from)} AND p.sellingPrice <= ${parseFloat(queryobj.to)}`);
+    } else if (queryobj.from) {
+      whereClause.push(`p.price >= ${parseFloat(queryobj.from)}`);
+    } else if (queryobj.to) {
+      whereClause.push(`p.price <= ${parseFloat(queryobj.to)}`);
+    }
+    whereClause = whereClause.length > 0 ? `WHERE ${whereClause.join(' AND ')}` : '';
+
+    // Build the ORDER BY clause for sorting
+    let orderByClause = [];
+    if (queryobj.sortOnsellingPrice) {
+      orderByClause.push(`p.sellingPrice ${queryobj.sortOnsellingPrice === 'asc' ? 'ASC' : 'DESC'}`);
+    }
+    orderByClause = orderByClause.length > 0 ? `ORDER BY ${orderByClause.join(', ')}` : '';
+
+    // Cypher query to find products based on filters and sorting
+    const query = `
+      MATCH (p:Product)-[:shop_of]->(s:Shop{email:$emailshop})
+      ${whereClause}
+      ${orderByClause}
+      RETURN p
+    `;
+
+    const result = await session.run(query,{emailshop});
+
+    const products = result.records.map(record => record.get('p').properties);
+
+    res.status(200).json({
+      count: products.length,
+      success: true,
+      message: "Get Different Types products",
+      products: products
+    });
+  } catch (err) {
+    next(new customError(err.message, 404));
+  } finally {
+    session.close();
+  }
+};

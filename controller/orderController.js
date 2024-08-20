@@ -4,135 +4,191 @@ const Track = require("../models/tracking");
 const Order = require("../models/order");
 const Shop = require("../models/shop");
 const { createOtp } = require("./shopController");
+const driver = require("../config/neo4j");
 module.exports.createOrder = async (req, res, next) => {
-  console.log("deepak",req.body);
-  req.body.user=req.user._id;
-  req.body.orderItems=JSON.parse(req.body.orderItems);
-  console.log("image",typeof(req.body.orderItems[0].image));
-  console.log("image length",req.body.orderItems[0].image.length);
-  console.log("length",req.body.orderItems.length);
-  req.body.orderItems[0].image
-  req.body.shippingInfo={contactNumber:req.body.contactNumber,address:req.body.address,
-    state:req.body.state,country:req.body.country,postalCode:req.body.postalCode,city:req.body.city};
-  console.log("ram",req.body.itemsPrice,
-    req.body.taxPrice,
-    req.body.shippingPrice,
-    req.body.totalPrice);
+  const userId = req.user.elementId;
+  console.log(userId);
+  const orderItemsArray = req.body.orderItems;
+  const paymentmode = req.body.paymentmode;
+  console.log(paymentmode);
+  console.log(orderItemsArray);
+  const createdAt = new Date().toISOString();
+  console.log(createdAt);
+  const session = driver.session();
+  const tx = session.beginTransaction();
+
   try {
-    const orderCreated = await Order.create(req.body);
-    if (!orderCreated) {
-      next(new customError("Order not placed",400));
-    } else {
-      for (let i = 0; i < orderCreated.orderItems.length; i++) {
-        let productId = orderCreated.orderItems[i].product;
-        let quan = orderCreated.orderItems[i].Quantity;
-        const trackingItem = await Track.create({
-          productId,
-          status: "processing",
-        });
+    // Create Order node and link it to the User
+    for (let i = 0; i < orderItemsArray.length; i++) {
+      const productId = orderItemsArray[i].productId;
+      const quantity = orderItemsArray[i].quantity;
+      const priceperpiece = orderItemsArray[i].priceperpiece;
+      const totalprice = priceperpiece * quantity;
+      const createOrderQuery = `
+  MATCH (u:User)
+  WHERE elementId(u)=$userId
+  MATCH (p:Product)-[:shop_of]-(s:Shop)
+  WHERE elementId(p)=$productId
+  CREATE (o:Order {
+    orderId: apoc.create.uuid(),
+    productId: $productId,
+    quantity: $quantity,
+    priceperpiece: $priceperpiece,
+    totalprice: $totalprice,
+    paymentmode: $paymentmode,
+    contactNumber: $contactNumber,
+    address: $address,
+    state: $state,
+    country: $country,
+    postalCode: $postalCode,
+    city: $city,
+    status: "ordered",
+    createdAt: $createdAt
+  })
+  CREATE (u)-[:order_list_user]->(o)
+  CREATE (s)-[:order_list_shop]->(o)
+  RETURN o
+`;
 
-        orderCreated.orderItems[i].trackingId = trackingItem._id;
-        await orderCreated.save();
+const createOrderParams = {
+  userId: userId,
+  productId: productId,
+  quantity: quantity,
+  priceperpiece: priceperpiece,
+  totalprice: totalprice,
+  paymentmode: paymentmode,
+  contactNumber: req.body.contactNumber,
+  address: req.body.address,
+  state: req.body.state,
+  country: req.body.country,
+  postalCode: req.body.postalCode,
+  city: req.body.city,
+  createdAt: createdAt
+};
 
-        const product = await Product.findById(productId);
-        // console.log(product);
+      const orderResult = await tx.run(createOrderQuery, createOrderParams);
+      const createdOrder = orderResult.records;
+      console.log(createdOrder);
 
-        const shopId = product.shopId;
-        const shop = await Shop.findById(shopId);
-        const currentDate = new Date();
-        const currentMonth = currentDate.getMonth();
-        console.log("current",currentMonth);
-        console.log("shop",shop);
-        console.log("typeof",shop.sellerTotalSellArray[currentMonth]);
-        console.log("sum",parseInt(product.sellingPrice) +10,parseInt(quan)+90);
-        console.log("type",(parseInt(product.sellingPrice) * parseInt(quan)));
-        shop.sellerTotalSellArray[currentMonth] = shop.sellerTotalSellArray[currentMonth]+(parseFloat(product.sellingPrice) * parseFloat(quan));
-        await shop.save();
-        if (!product){
-          next(new customError("Product not found",404));
-          return;
-        } else {
-          let stock = product.stock;
-          let newStock = stock - quan;
-          await Product.findByIdAndUpdate(productId, {
-            $set: { stock: newStock },
-          });
-        }
-      }
+      const quantityQuery = `
+        MATCH (p:Product)
+        WHERE elementId(p) = $productId
+        SET p.stock = p.stock - $quantity
+        RETURN p
+      `;
 
-      res.status(200).json({
-        success: true,
-        message: "Order placed successfully",
-        orderCreated,
-      });
+      const quantityParams = {
+        productId: productId,
+        quantity: quantity,
+      };
+      await tx.run(quantityQuery, quantityParams);
     }
+    await tx.commit();
+
+    res.status(200).json({
+      success: true,
+      message: "Order placed successfully",
+    });
   } catch (err) {
-    next(new customError(err.message, 404));
+    await tx.rollback();
+    next(new customError(err.message, 400));
+  } finally {
+    session.close();
   }
 };
 
 module.exports.deleteOrder = async (req, res, next) => {
   const id = req.params.id;
+  const session = driver.session(); // Assume `driver` is your Neo4j driver instance
+
   try {
-    const getOrder = await Order.findById(id);
-    if (getOrder.orderStatus === "processing") {
-      const deleteStatus = await Order.findByIdAndDelete(id);
-      if (!deleteStatus) {
-        next(new customError("Unable to cancel order", 500));
-      } else {
-        for (let i = 0; i < getOrder.orderItems.length; i++) {
-          let id = getOrder.orderItems[i].product;
-          let quan = getOrder.orderItems[i].Quantity;
-          console.log(id, quan);
+    // Check if the order is in "processing" or "ordered" status
+    const result = await session.run(`
+      MATCH (o:Order {orderId: $id})
+      WHERE o.status = "processing" OR o.status = "ordered"
+      RETURN o
+    `, { id });
 
-          const product = await Product.findById(id);
-          console.log(product);
-
-          if (!product) {
-            next(new customError("Product not found", 404));
-            return;
-          } else {
-            let stock = product.stock;
-            let newStock = stock + quan;
-            await Product.findByIdAndUpdate(id, {
-              $set: { stock: newStock },
-            });
-          }
-        }
-
-        res.status(200).json({
-          success: true,
-          message: "Order cancelled successfully",
-        });
-      }
-    } else {
-      next(new customError("Order cannot be cancelled now.", 500));
+    if (result.records.length === 0) {
+      // Order cannot be cancelled if not found or not in correct status
+      return next(new customError("Order cannot be cancelled now.", 500));
     }
+
+    // Extract productId and quantity from the result
+    const order = result.records[0].get('o').properties;
+    const productId = order.productId;
+    const quantity = order.quantity;
+
+    // Update the product stock
+    await session.run(`
+      MATCH (p:Product {productId: $productId})
+      SET p.stock = p.stock + $quantity
+      RETURN p
+    `, {
+      productId: productId,
+      quantity: quantity
+    });
+
+    // Delete the order
+    await session.run(`
+      MATCH (o:Order {orderId: $id})
+      DETACH DELETE o
+    `, { id });
+
+    res.status(200).json({
+      success: true,
+      message: "Order cancelled successfully",
+    });
   } catch (err) {
+    // Handle errors
     next(new customError(err.message, 400));
+  } finally {
+    // Ensure the session is closed
+    await session.close();
   }
 };
 
-// module.exports.updateOrderStatus = async (req, res, next) => {
-//   const id = req.params.id;
-//   const orderstatus = req.body.orderStatus;
-//   try {
-//     const updatedOrder = await Order.findByIdAndUpdate(
-//       id,
-//       { $set: { orderStatus: orderstatus } },
-//       { new: true }
-//     );
 
-//     if (!updatedOrder) {
-//       next(new customError("Order status not updated", 400));
-//     } else {
-//       res.status(200).json({
-//         succes: true,
-//         message: "Order status updated succesfully",
-//         updatedOrder,
-//       });
-//     }
-//   } catch (err) {
-//     next(new customError(err.message, 400));
-//   }
-// };
+module.exports.updateOrderStatus = async (req, res, next) => {
+  const id = req.params.id;
+  const userrole=req.user.role;
+  const orderstatus = req.body.orderstatus;
+  if(userrole=="user"){
+     return next(customError("You are Not Authorised",501));
+  }
+  else if(userrole=="seller"&&orderstatus=="accepted"){
+
+  }
+  else if(userrole=="rider"&&orderstatus=="picked"){
+
+  }
+  else if(userrole=="rider"&&orderstatus=="delivered"){
+     
+  }
+  else{
+    return next(customError("You are Not Authorised",501));
+  }
+  const session = driver.session();
+  try {
+      const result=await session.run(`
+        MATCH (o:Order {orderId: $id})
+        SET o.status=$orderstatus
+        return o
+        `,{
+          id:id,
+          orderstatus:orderstatus
+        })
+        console.log();
+    if (result.records.length==0) {
+      next(new customError("Order status not updated", 400));
+    } else {
+      res.status(200).json({
+        succes: true,
+        message: "Order status updated succesfully",
+        result:result.records[0].get('o').properties,
+      });
+    }
+  } catch (err){
+    next(new customError(err.message, 400));
+  }
+};

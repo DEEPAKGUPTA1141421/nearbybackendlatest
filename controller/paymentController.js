@@ -19,7 +19,6 @@ module.exports.checkout = async (req, res, next) => {
 
   try {
     const order = await instance.orders.create(options);
-    console.log(order);
     res.status(200).json({
       success: true,
       order,
@@ -40,7 +39,6 @@ module.exports.paymentVerification = async (req, res, next) => {
     .update(body.toString())
     .digest("hex");
 
-  console.log(expectedSignature);
 
   if (expectedSignature === razorpay_signature) {
     const payment = {

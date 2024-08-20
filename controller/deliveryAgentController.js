@@ -2,34 +2,82 @@ const customError = require("../middleware/customError");
 const Rider = require("../models/rider");
 const Order = require("../models/order");
 const Track = require("../models/tracking");
-
+const driver = require("../config/neo4j");
 module.exports.createRider = async (req, res, next) => {
+  const {
+    name,email,phoneNumber,city,adhaharNumber,panNumber,age,gender,policeCase,password,
+    imageofrider,role = "Rider",jointAt = new Date(),typeOfVan,nameOfVan,
+    riderTotalWageArray = new Array(12).fill(0),
+    riderTotalPaymentArray = new Array(12).fill(0),
+    riderTotalRemainingArray = new Array(12).fill(0),
+  } = req.body;
+  const checkQuery = `
+    MATCH (r:Rider {email: $email})
+    RETURN r
+  `;
+  const createQuery = `
+    CREATE (r:Rider {
+      name: $name,
+      email: $email,
+      phoneNumber: $phoneNumber,
+      city: $city,
+      adhaharNumber: $adhaharNumber,
+      panNumber: $panNumber,
+      age: $age,
+      gender: $gender,
+      policeCase: $policeCase,
+      password: $password,
+      imageofrider: $imageofrider,
+      role: $role,
+      jointAt: $jointAt,
+      typeOfVan: $typeOfVan,
+      nameOfVan: $nameOfVan,
+      riderTotalWageArray: $riderTotalWageArray,
+      riderTotalPaymentArray: $riderTotalPaymentArray,
+      riderTotalRemainingArray: $riderTotalRemainingArray
+    })
+    RETURN id(r) AS riderId
+  `;
+  const session=await driver.session();
   try {
-    const data = req.body;
-    console.log(data);
-    const rider = await Rider.findOne({ email: data.email });
-    if (rider) {
-      console.log("rider already exists");
-      next(new customError("rider with this email already exists", 400));
+    const result = await session.run(checkQuery, { email });
+    if (result.records.length > 0) {
+      next(new customError("Rider with this email already exists", 400));
     } else {
-      console.log("rider does not already exists");
-      const newrider = await Rider.create(data);
-      console.log("rider1 already exists");
-      if (!newrider) {
-        next(new customError("rider not created", 400));
-      } else {
-        res.status(200).json({
-          success: true,
-          message: "rider Created successfully",
-          rider: newrider,
-        });
-      }
+      const createResult = await session.run(createQuery, {
+        name,
+        email,
+        phoneNumber,
+        city,
+        adhaharNumber,
+        panNumber,
+        age,
+        gender,
+        policeCase,
+        password,
+        imageofrider,
+        role,
+        jointAt,
+        typeOfVan,
+        nameOfVan,
+        riderTotalWageArray,
+        riderTotalPaymentArray,
+        riderTotalRemainingArray
+      });
+      const riderId = createResult.records[0].get('riderId');
+      res.status(200).json({
+        success: true,
+        message: "Rider created successfully",
+        riderId: riderId
+      });
     }
   } catch (error) {
     next(new customError(error.message, 400));
   }
+  finally{
+    await session.close();
+  }
 };
-
 module.exports.deleteorderByRider = async (req, res, next) => {
   const { id } = req.params.id;
   try {
@@ -50,9 +98,7 @@ module.exports.receiveOrder = async (req, res, next) => {
   let otp = req.body.otp;
   let trackingId = req.params.id;
   if (otp) {
-    console.log(otp);
     const track = await Track.findById(trackingId);
-    console.log(track);
     if (track.sellerotp === otp) {
       const currentTime = Date.now();
       if (currentTime < track.sellerotpExpires) {

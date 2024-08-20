@@ -3,16 +3,13 @@ const Message = require("../models/message");
 const Chat =require("../models/chat");
 const User=require("../models/user");
 const Shop=require("../models/shop");
+const newChat = require("../models/newChat");
+const newMessage=require("../models/newMessage");
 module.exports.accesschat=async(req,res,next)=>{
     const userId=req.user._id;
-    // const receiverId=req.params.shopId;
-    console.log("query",req.params.receiverId);
-    // console.log("shopId",req.params.receiverId);
     const shop=await Shop.findById(req.params.receiverId);
-    console.log("shop",shop);
     receiverId=shop.user;
-    console.log("userId",userId,receiverId);
-    var  isChat=await Chat.find({
+    var  isChat=await newChat.find({
         $and:[
             {users:{$eq:receiverId}},
             {users:{$eq:userId}}
@@ -54,8 +51,6 @@ module.exports.fetchchat=async(req,res,next)=>{
         .populate("latestMessage")
         .sort({ updatedAt: -1 })
         .exec();
-        
-        console.log("all chats",chats);  
         if(!chats){
             next(new customError("no chat for this user",404));
         } 
@@ -77,14 +72,13 @@ module.exports.sendmessage=async(req,res,next)=>{
         // const userId=req.body.userId;
         // const chatId=req.body.chatId;
         const{content}=req.body;
-        console.log("content",content,chatId);
         var newMessage={
             sender:userId,
             content:content,
             chat:chatId
         }
         const message=await Message.create(newMessage);
-        const populatedMessage = await Message.findById(message._id).populate('chat').exec();
+        const populatedMessage = await newMessage.findById(message._id).populate('chat').exec();
         await Chat.findByIdAndUpdate(chatId,{
             latestMessage:message._id
         });

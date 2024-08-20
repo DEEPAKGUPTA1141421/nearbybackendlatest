@@ -1,3 +1,5 @@
+const bcrypt=require("bcrypt");
+const jwt = require("jsonwebtoken");
 module.exports.sendToken=async(user,statusCode,message,res)=>{
     const token=user.getJwtToken();
     // options for cookies
@@ -13,3 +15,12 @@ module.exports.sendToken=async(user,statusCode,message,res)=>{
         success:true
     })
 };
+module.exports.getToken = (user) => {
+    const jwtSecretKey = process.env.JwtSecretKey;
+    const jwtExpires = process.env.jwtExpires;
+    const payload = { id: user.elementId}; // Ensure 'element_id' is correctly referenced
+    return jwt.sign(payload, jwtSecretKey, {
+      expiresIn: jwtExpires,
+    });
+};
+  

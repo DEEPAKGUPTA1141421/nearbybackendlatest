@@ -4,15 +4,24 @@ const Track = require("../models/tracking");
 const Product = require("../models/product");
 const Shop = require("../models/shop");
 const Payment = require("../models/payment");
+const driver = require("../config/neo4j");
 
 module.exports.getAllProductsInProcessing = async (req, res, next) => {
+  const session=await driver.session();
   try {
-    console.log(req.user);
-    const processingOrders = await Track.find({ status: "processing" }).populate("productId").exec();
-    if (processingOrders) {
+    const orderNode=await session.run(`
+      MATCH (o:Order)
+      where o.status="accepted"
+      RETURN o;
+      `) 
+    if (orderNode.records.length){
+      const processingOrder=[];
+      for(let i=0;i<orderNode.records.length;i++){
+         processingOrder.push(orderNode.records[i].get('o').properties);
+      }
       res.status(200).json({
         success: true,
-        processingOrders,
+        processingOrder
       });
     } else {
       next(new customError("no products now", 400));
@@ -40,13 +49,6 @@ module.exports.getinfopaymentrider=async(req,res,next)=>{
             { 'riderTotalRemainingArray.11': { $gt: 0 } }
         ]
     });
-
-    // Calculate the total remaining amount for each rider
-    // riders.forEach(rider =>{
-    //     const totalRemaining = rider.riderTotalRemainingArray.reduce((acc, val) => acc + val, 0);
-    //     console.log(`Total remaining amount for rider ${rider._id}: ${totalRemaining}`);
-    // });
-
     res.status(200).json({
         success: true,
         rider: riders
@@ -55,7 +57,6 @@ module.exports.getinfopaymentrider=async(req,res,next)=>{
     next(new customError(err.message,404));
 }
 }
-
 module.exports.getinfopaymentseller=async(req,res,next)=>{
   try {
     // Find riders with remaining payments greater than 0 for any month
@@ -75,13 +76,6 @@ module.exports.getinfopaymentseller=async(req,res,next)=>{
             { 'sellerTotalRemainingArray.11': { $gt: 0 } }
         ]
     });
-
-    // Calculate the total remaining amount for each rider
-    // riders.forEach(rider =>{
-    //     const totalRemaining = rider.riderTotalRemainingArray.reduce((acc, val) => acc + val, 0);
-    //     console.log(`Total remaining amount for rider ${rider._id}: ${totalRemaining}`);
-    // });
-
     res.status(200).json({
         success: true,
         seller: sellers
@@ -90,21 +84,15 @@ module.exports.getinfopaymentseller=async(req,res,next)=>{
     next(new customError(err.message,404));
 }
 }
-
-////////////////////////////////////////PROBLEM(trackingId not storing in db)////////////////////////////////////////
 module.exports.allocateOrders = async (req, res, next) => {
-  console.log("called");
   let trackingId = req.params.trackingid;
-  console.log(trackingId);
   try {
     const trackingItem = await Track.findById(trackingId)
       .populate({ path: "productId", populate: { path: "shopId" } })
       .exec();
-    console.log(trackingItem);
 
     if (trackingItem) {
       const shopCity = trackingItem.productId.shopId.address.city;
-      console.log(shopCity);
 
       try {
         const ridersInShopCity = await Rider.find({ city: shopCity }).sort({
@@ -112,7 +100,6 @@ module.exports.allocateOrders = async (req, res, next) => {
           "completedOrder.length": -1,
         });
 
-        console.log(ridersInShopCity);
 
         if (ridersInShopCity.length == 0) {
           next(new customError("no rider is available", 400));
@@ -128,8 +115,6 @@ module.exports.allocateOrders = async (req, res, next) => {
           await trackingItem.save();
           await rider.save();
 
-          console.log(rider.allocatedOrder);
-          console.log(trackingId, " has been handed over to ", riderName);
 
           res.status(200).json({
             success: true,

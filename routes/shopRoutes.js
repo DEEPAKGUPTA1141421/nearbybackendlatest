@@ -4,7 +4,6 @@ const {
   getshopInfo,
   updateShopInfo,
   getAllProduct,
-  createOtp,
   getAllOrderOfShop,
   bestshop,
   getAllShopOfCity,
@@ -12,16 +11,17 @@ const {
   gettopshop,
 } = require("../controller/shopController");
 const { isAuthenticated } = require("../middleware/authorised");
+const { createOtp } = require("../controller/userController");
 const router = express.Router();
 
 router.post("/create",isAuthenticated, createShop);
 router.get("/get",isAuthenticated, getshopInfo);
 router.get('/gettopshop',gettopshop);
-router.put("/updateshop/:id", updateShopInfo);
+router.put("/updateshop",isAuthenticated, updateShopInfo);
 // get all products
-router.get("/getAllProduct",isAuthenticated, getAllProduct);
+router.get("/getAllProduct",isAuthenticated,getAllProduct);
 // get otp
-router.get("/createotp/:id", createOtp);
+router.get("/createotp",isAuthenticated,createOtp);
 // orders placed from this shop
 
 router.get("/getallorderofshop/:id", getAllOrderOfShop);

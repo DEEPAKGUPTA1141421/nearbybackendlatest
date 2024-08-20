@@ -69,7 +69,7 @@ const shop = new mongoose.Schema(
         required: true,
       },
     ],
-    sellerTotalSellArray: {
+    sellerTotalSellArray:{
       type: [Number],
       default: new Array(12).fill(0),
     },

@@ -2,38 +2,14 @@ const customError = require("../middleware/customError");
 const Product = require("../models/product");
 const Shop = require("../models/shop");
 const cloudinary=require("cloudinary");
-const customResponse = (message, success, res) => {
-  res.status(400).json({
-    success: success,
-    message: message,
-  });
-};
-
+const neo4j = require('neo4j-driver');
+const { findShopByEmail } = require("../utils/query");
+const driver = require("../config/neo4j");
 module.exports.createProduct = async (req, res, next) => {
-  console.log("inside product");
-  let data = req.body;
-  // const uploadOptions={
-  //   use_filename:true,
-  //   public_id:"optional"
-  // }
+  const data = req.body;
+  let email;
   const uploadedImages = req.body.images;
-  // const files = req.files.images;
-  // for (let i = 0; i < files.length; i++) {
-  //   try{
-  //     const result = await cloudinary.v2.uploader.upload(files[i].path, {
-  //       folder: "avatars",
-  //     });
-  
-  //     uploadedImages.push({
-  //       public_id: result.public_id,
-  //       url: result.secure_url,
-  //     });
-  //   }
-  //   catch(err){
-  //     next(new customError(err.message,404));
-  //   }
-  // }
-  const {shopId}=req.params;
+  console.log(uploadedImages);
   const {
     name,
     description,
@@ -42,253 +18,504 @@ module.exports.createProduct = async (req, res, next) => {
     sellingPrice,
     stock,
     category,
+    subcategory,
     genderspecific,
+    latitude,
+    longitude
   } = data;
-  // console.log(data);
 
+  const session = driver.session();
+  const userId = req.user.elementId;
   try {
-    const productCreated = await Product.create({
-      name,
-      description,
-      actualPrice,
-      discountPrice,
-      sellingPrice,
-      stock,
-      shopId,
-      category,
-      genderSpecific: genderspecific,
-      images:uploadedImages
-    });
-
-    const s = await Shop.findById(shopId);
-    // console.log(s);
-    if (!s) {
-      next(new customError("Shop Not Found"), 404);
+    const user = await session.run(
+      `
+        MATCH (u:User)
+        WHERE elementId(u) = $id
+        RETURN u
+        `,
+      { id:userId }
+    );
+    let userNode;
+    if (user.records.length >0) {
+       userNode = user.records[0].get("u");
+       email=userNode.properties.email;
     }
     else{
-      s.productId.push(productCreated.id);
-    await s.save();
-    console.log("sucess");
+      next(new customError("User Not Present"),404);
+    }
+    const createdAt = new Date().toISOString();
+    const productResult = await session.run(
+      `
+      CREATE (p:Product {
+        location: point({ latitude: $latitude, longitude: $longitude }),
+        name: $name,
+        description: $description,
+        actualPrice: $actualPrice,
+        discountPrice: $discountPrice,
+        sellingPrice: $sellingPrice,
+        stock: $stock,
+        category: $category,
+        genderSpecific: $genderspecific,
+        images: $images,
+        subcategory: $subcategory,
+        createdAt:$createdAt
+      })
+      WITH p
+      MATCH (s:Shop {email: $email})
+      CREATE (s)-[:product_list]->(p)
+      CREATE (p)-[:shop_of]->(s)
+      RETURN p
+      `,
+      {
+        latitude,
+        longitude,
+        name,
+        description,
+        actualPrice: actualPrice,
+        discountPrice: discountPrice,
+        sellingPrice: sellingPrice,
+        stock:stock,
+        category,
+        genderspecific: genderspecific,
+        images: "uploadedImages",
+        subcategory:subcategory,
+        createdAt:createdAt,
+        email:email,
+      }
+    );
+
+    const productCreated = productResult.records[0].get('p');
+
     res.status(200).json({
       success: true,
       message: "Product created successfully",
-      productCreated: productCreated,
+      productCreated,
     });
-    }
   } catch (err) {
     next(new customError(err.message, 400));
+  } finally {
+    await session.close();
   }
 };
 
 module.exports.getProduct = async (req, res, next) => {
   let productId = req.params.id;
+  const session = driver.session();
 
   try {
-    const product = await Product.findById(productId).populate("shopId").exec();
-    if (product) {
+    const result = await session.run(
+      `
+      MATCH (p:Product)-[:product_list]->(s:Shop)
+      WHERE elementId(p) = $productId
+      RETURN p, s
+      `,
+      { productId: productId }
+    );
+    
+
+    const productRecord = result.records[0];
+
+    if (!productRecord) {
+      res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    } else {
+      const product = productRecord.get('p').properties;
+      const shop = productRecord.get('s').properties;
       res.status(200).json({
         success: true,
         message: "Product found",
-        product,
+        product: {
+          ...product,
+          shop: shop
+        },
       });
-    } else {
-      customResponse("Product not found", false, res);
     }
   } catch (err) {
-    next(new customError(err));
+    next(new customError(err.message, 500));
+  } finally {
+    await session.close();
   }
 };
 
 module.exports.updateProduct = async (req, res, next) => {
   const productId = req.params.id;
+  const productDetails = req.body;
+  const email =req.user.properties.email;
+  const session = driver.session();
+  const query = `
+    MATCH (p:Product)-[:product_list]-(s:Shop {email:$email} )
+    WHERE elementId(p) = $productId
+    SET p += $productDetails
+    RETURN p
+  `;
+
+  const params = {
+    productId: productId,
+    productDetails: productDetails,
+    email:email
+  };
 
   try {
-    const updatedProduct = await Product.findByIdAndUpdate(
-      productId,
-      req.body,
-      { new: true }
-    );
-
-    console.log(updatedProduct);
+    const result = await session.run(query, params);
+    const updatedProduct = result.records[0]?.get('p').properties;
 
     if (updatedProduct) {
       res.status(200).json({
         success: true,
         message: "Product updated successfully",
+        product: updatedProduct
       });
     } else {
-      customResponse("Failed to update product", false, res);
+      next(new customError("Failed to update product", false, res));
     }
   } catch (err) {
-    next(new customError(err));
+    next(new customError(err.message,404));
+  } finally {
+    session.close();
   }
 };
 
 module.exports.deleteProduct = async (req, res, next) => {
-  let productId = req.params.id;
+  const productId = req.params.id;
+  const email =req.user.properties.email;
+  const session = driver.session();
+  const query = `
+  MATCH (p:Product)-[:product_list]-(s:Shop{email:$email})
+  where elementId(p)=$productId
+  DETACH DELETE p
+`;
 
-  try {
-    const productDeleted = await Product.findByIdAndDelete(productId);
-    if (productDeleted) {
-      res.status(200).json({
-        success: true,
-        message: "Product deleted successfully",
-      });
-    } else {
-      customResponse("Failed to delete product", false, res);
-    }
-  } catch (err) {
-    next(new customError(err));
+const params = { productId: productId,email:email };
+
+try {
+  const deleteproduct=await session.run(query, params);
+  if(!deleteproduct){
+    next(new customError("Failed to delete product",501));
   }
-};
-
-module.exports.searchProducts = async (req, res, next) => {
-  try {
-    console.log("checking params",req.query);
-    let filterQuery = {};
-    let searchTerm = req.query.searchTerm || "";
-    console.log(searchTerm);
-
-    if (searchTerm) {
-      filterQuery.name = {
-        $regex: searchTerm,
-        $options: "i", // case-insensitive search
-      };
-    }
-    if(req.query.category){
-      filterQuery.category= {
-        $regex: req.query.category,
-        $options: "i", // case-insensitive search
-      };
-    }
-    if (req.query.from && req.query.to) {
-      filterQuery.sellingPrice = {
-        $gte: parseFloat(req.query.from),
-        $lte: parseFloat(req.query.to),
-      };
-    }
-    let boollimit=false;
-    let products;
-    if(req.query.limitproduct){
-      boollimit=true;
-    }
-    if(boollimit){
-      products=await Product.find(filterQuery).limit(req.query.limitproduct);
-    }
-    else{
-      products = await Product.find(filterQuery);
-    }
-
-    if (req.query.latest) {
-      products.sort((a, b) => b.createdAt - a.createdAt);
-    }
-
-    if (req.query.asc) {
-      products.sort((a, b) => a.sellingPrice - b.sellingPrice);
-    } else if (req.query.desc) {
-      products.sort((a, b) => b.sellingPrice - a.sellingPrice);
-    }
-
-    if (req.query.rating) {
-      products.sort((a, b) => b.totalRating - a.totalRating);
-    }
-
+  else{
     res.status(200).json({
       success: true,
-      products,
+      message: "Product deleted successfully",
+    });
+  }
+}
+catch(err){
+  next(new customError("Failed to delete product from MongoDB",501));
+}
+finally {
+  session.close();
+}
+};
+module.exports.searchAndFindNearbyProducts = async (req, res, next) => {
+  const session = await driver.session();
+  const queryobj = req.query;
+  console.log(req.query);
+  const page = parseInt(queryobj.page) || 1;
+  const limit = parseInt(queryobj.limit) || 10;
+  const skip = (page - 1) * limit;
+
+  const userEmail = req.user.properties.email;
+  console.log(typeof(Number(queryobj.distance)));
+  const maxDistanceMeters = (Number(queryobj.distance) || 0) * 1000; // distance in meters
+
+  try {
+    // Build the WHERE clause for filtering
+    let whereClause = [];
+    if (queryobj.subcategory) {
+      whereClause.push(`p.subcategory = '${queryobj.subcategory}'`);
+    }
+    if (queryobj.genderSpecific) {
+      whereClause.push(`p.genderSpecific = '${queryobj.genderSpecific}'`);
+    }
+    if (queryobj.stock) {
+      whereClause.push(`p.stock >= ${parseFloat(queryobj.stock)}`);
+    }
+    if (queryobj.category) {
+      whereClause.push(`p.category = '${queryobj.category}'`);
+    }
+    if (queryobj.name) {
+      whereClause.push(`toLower(p.name) =~ '(?i).*${queryobj.name}.*'`);
+    }
+    if (queryobj.description) {
+      whereClause.push(`toLower(p.description) =~ '(?i).*${queryobj.description}.*'`);
+    }
+    if (queryobj.from && queryobj.to) {
+      whereClause.push(`p.sellingPrice >= ${parseFloat(queryobj.from)} AND p.sellingPrice <= ${parseFloat(queryobj.to)}`);
+    } else if (queryobj.from) {
+      whereClause.push(`p.sellingPrice >= ${parseFloat(queryobj.from)}`);
+    } else if (queryobj.to) {
+      whereClause.push(`p.sellingPrice <= ${parseFloat(queryobj.to)}`);
+    }
+    whereClause = whereClause.length > 0 ? `WHERE ${whereClause.join(' AND ')}` : '';
+
+    // Build the ORDER BY clause for sorting
+    let orderByClause = [];
+    if (queryobj.sortOnsellingPrice) {
+      orderByClause.push(`p.sellingPrice ${queryobj.sortOnsellingPrice === 'asc' ? 'ASC' : 'DESC'}`);
+    }
+    if (queryobj.sortOnrating) {
+      orderByClause.push(`p.rating ${queryobj.sortOnrating === 'asc' ? 'ASC' : 'DESC'}`);
+    }
+    orderByClause = orderByClause.length > 0 ? `ORDER BY ${orderByClause.join(', ')}` : '';
+
+    // Cypher query to find products based on filters and distance
+    const cypherQuery = `
+      MATCH (u:User {email:$email})-[:address_list]->(a:Address)
+      WITH point({srid: 4326, x: a.location.longitude, y: a.location.latitude}) AS userPoint
+      MATCH (p:Product)
+      WHERE point.distance(userPoint, point({srid: 4326, x: p.location.longitude, y: p.location.latitude})) <= $maxDistance
+      ${whereClause}
+      ${orderByClause}
+      RETURN p, point.distance(userPoint, point({srid: 4326, x: p.location.longitude, y: p.location.latitude})) AS distance
+    `;
+
+    // Run the query
+    const result = await session.run(cypherQuery, {
+      email: userEmail,
+      maxDistance: maxDistanceMeters,
+      skip: skip,
+      limit: limit
+    });
+
+    const products = result.records.map(record => {
+      // Convert distance to a number
+      const distance = record.get('distance');
+      const distanceValue = distance.toNumber ? distance.toNumber() : Number(distance);
+    
+      return {
+        product: record.get('p').properties,
+        distance: distanceValue
+      };
+    });
+
+    // Get the total count for pagination info
+    const countQuery = `
+      MATCH (u:User {email:$email})-[:address_list]->(a:Address)
+      WITH point({srid: 4326, x: a.location.longitude, y: a.location.latitude}) AS userPoint
+      MATCH (p:Product)
+      WHERE point.distance(userPoint, point({srid: 4326, x: p.location.longitude, y: p.location.latitude})) <= $maxDistance
+      ${whereClause}
+      RETURN COUNT(p) AS totalCount
+    `;
+    const countResult = await session.run(countQuery, { email: userEmail, maxDistance: maxDistanceMeters });
+    const totalCount = countResult.records[0].get('totalCount').toInt();
+    const totalPages = Math.ceil(totalCount / limit);
+
+    res.status(200).json({
+      count: products.length,
+      totalCount: totalCount,
+      totalPages: totalPages,
+      currentPage: page,
+      success: true,
+      message: "Products retrieved successfully",
+      products: products
     });
   } catch (err) {
-    next(new customError(err));
+    next(new customError(err.message, 500));
+  } finally {
+    await session.close();
   }
 };
-// module.exports.searchProducts = async (req, res, next) => {
-//   try {
-//     console.log("hello dost", req.query.category);
-//     let filterQuery = {};
-//     // let searchTerm = req.query.searchTerm || "";
-//     // console.log(searchTerm);
 
-//     // if (searchTerm) {
-//     //   filterQuery.name = {
-//     //     $regex: searchTerm,
-//     //     $options: "i", // case-insensitive search
-//     //   };
-//     // }
-//     const searchTerm = req.query.searchTerm;
-//     const asc = req.query.asc;
-//     const desc = req.query.desc;
-//     const rating = req.query.rating;
-//     const latest = req.query.latest;
-//     const from = req.query.from;
-//     const to = req.query.to;
-//     console.log("Search term:", searchTerm);
-//     console.log("Asc:", asc);
-//     console.log("Desc:", desc);
-//     console.log("Rating:", rating);
-//     console.log("Latest:", latest);
-//     console.log("From:", from);
-//     console.log("To:", to);
-//     if (req.query.category) {
-//       filterQuery.category = {
-//         $regex: req.query.category,
-//         $options: "i", // case-insensitive search
-//       };
-//     }
-//     if (req.query.from && req.query.to) {
-//       console.log("from ", req.query.from);
-//       console.log("to ", req.query.to);
-//       filterQuery.sellingPrice = {
-//         $gte: parseInt(req.query.from),
-//         $lte: parseInt(req.query.to),
-//       };
-//     }
-//     else if(req.query.from){
-//       filterQuery.sellingPrice={
-//         $gte:parseInt(req.query.from)
-//       }
-//     }
-//     else if(req.query.to){
-//       filterQuery.sellingPrice={
-//         $lte:parseInt(req.query.to)
-//       }
-//     }
-//     let boollimit = false;
-//     let products;
-//     if (req.query.limitproduct) {
-//       boollimit = true;
-//     }
-//     if (req.query.rating) {
-//       console.log("rating", req.query.rating);
-//       products.sort((a, b) => b.totalRating - a.totalRating);
-//     }
-//     if (boollimit) {
-//       products = await Product.find(filterQuery)
-//         .populate("shopId")
-//         .limit(req.query.limitproduct);
-//     } else {
-//       products = await Product.find(filterQuery).populate("shopId");
-//     }
-//     if (req.query.latest) {
-//       console.log("latest", req.query.latest);
-//       products.sort((a, b) => b.createdAt - a.createdAt);
-//     }
 
-//     if (req.query.asc) {
-//       console.log("asc", req.query.asc);
-//       products.sort((a, b) => a.sellingPrice - b.sellingPrice);
-//     } 
-//     if (req.query.desc) {
-//       console.log("desc", req.query.desc);
-//       products.sort((a, b) => b.sellingPrice - a.sellingPrice);
-//     }
-//     console.log("count",products.length);
-//     res.status(200).json({
-//       success: true,
-//       message:"get all product after filter",
-//       countofproduct:products.length,
-//       products,
-//     });
-//   } catch (err) {
-//     next(new customError(err));
-//   }
-// };
+module.exports.productrating = async (req, res, next) => {
+  const session = await driver.session();
+  const userId = req.user.elementId;
+  const productId = req.params.id;
+  const rating = req.body.rating;
+
+  if (rating > 5) {
+    return next(new customError("Rating can't be greater than 5", 501));
+  }
+
+  try {
+    // Check if the rating already exists
+    const resultNode = await session.run(`
+      MATCH (r:ProductRating {userId: $userId, productId: $productId})
+      RETURN r
+    `, {
+      userId,
+      productId
+    });
+
+    if (resultNode.records.length > 0) {
+      // Update existing rating
+      const updateNode = await session.run(`
+        MATCH (r:ProductRating {userId: $userId, productId: $productId})
+        SET r.rating = $rating
+        RETURN r
+      `, {
+        userId,
+        productId,
+        rating
+      });
+
+      if (updateNode.records.length > 0) {
+        return res.status(200).json({
+          success: true,
+          message: "Rating updated successfully",
+        });
+      } else {
+        return next(new customError("Internal Server Error", 501));
+      }
+    } 
+
+    // Create new rating
+    const result = await session.run(`
+      CREATE (r:ProductRating {
+        rate: $rating,
+        userId: $userId,
+        productId: $productId
+      })
+      RETURN r
+    `, {
+      rating,
+      userId,
+      productId
+    });
+
+    if (result.records.length > 0) {
+      return res.status(200).json({
+        success: true,
+        message: "Rating successfully added",
+      });
+    } else {
+      return next(new customError("Internal Server Error", 501));
+    }
+  } catch (err) {
+    return next(new customError(err.message, 404));
+  } finally {
+    session.close();
+  }
+};
+module.exports.addComment = async (req, res, next) => {
+  const session = await driver.session();
+  const userId = req.user.elementId;
+  const productId = req.params.id;
+  const comment = req.body.comment;
+
+  if (!comment){
+    return next(new customError("Rating can't be greater than 5", 501));
+  }
+
+  try {
+    const result = await session.run(`
+      CREATE (r:ProductComment {
+        comment: $comment,
+        userId: $userId,
+        productId: $productId
+      })
+      RETURN r
+    `, {
+      comment,
+      userId,
+      productId
+    });
+
+    if (result.records.length > 0) {
+      return res.status(200).json({
+        success: true,
+        message: "Comment successfully added",
+      });
+    } else {
+      return next(new customError("Internal Server Error", 501));
+    }
+  } catch (err) {
+    return next(new customError(err.message, 404));
+  } finally {
+    session.close();
+  }
+};
+module.exports.findNearbyProducts = async (req, res, next) => {
+  const maxDistanceMeters = (req.body.distance) * 1000; 
+  console.log(req.body);
+  const userEmail=req.user.properties.email;
+  const session=await driver.session();
+  try {
+    const result = await session.run(`
+      MATCH (u:User {email:$email})-[:address_list]->(a:Address)
+      WITH point({srid: 4326, x: a.location.longitude, y: a.location.latitude}) AS userPoint
+      MATCH (p:Product)
+      WHERE point.distance(userPoint, point({srid: 4326, x: p.location.longitude, y: p.location.latitude})) <= $maxDistance
+      RETURN p, point.distance(userPoint, point({srid: 4326, x: p.location.longitude, y: p.location.latitude})) AS distance
+      ORDER BY distance ASC
+    `, {
+      email: userEmail,
+      maxDistance: maxDistanceMeters
+    });
+    
+    // Process and return results
+    const products = result.records.map(record => {
+      // Convert distance to a number
+      const distance = record.get('distance');
+      const distanceValue = distance.toNumber ? distance.toNumber() : Number(distance);
+    
+      return {
+        product: record.get('p').properties,
+        distance: distanceValue
+      };
+    });
+
+    console.log('Nearby Products:', products);
+    res.status(201).json({
+      message:"All Products",
+      products
+    })
+
+    return products;
+} catch (err) {
+        next(new customError(err.message,501));
+    } finally {
+        await session.close();
+    }
+};
+
+
+module.exports.findNearbyShop = async (req, res, next) => {
+  const maxDistanceMeters = (req.body.distance) * 1000; 
+  console.log(req.body);
+  const {category}=req.body;
+  const userEmail=req.user.properties.email;
+  const session=await driver.session();
+  try {
+    const result = await session.run(`
+      MATCH (u:User {email:$email})-[:address_list]->(a:Address)
+      WITH point({srid: 4326, x: a.location.longitude, y: a.location.latitude}) AS userPoint
+      MATCH (p:Shop)
+      WHERE point.distance(userPoint, point({srid: 4326, x: p.location.longitude, y: p.location.latitude})) <= $maxDistance AND p.category=$category
+      RETURN p, point.distance(userPoint, point({srid: 4326, x: p.location.longitude, y: p.location.latitude})) AS distance
+      ORDER BY distance ASC
+    `, {
+      email: userEmail,
+      maxDistance: maxDistanceMeters,
+      category:category
+    });
+    
+    // Process and return results
+    const shops = result.records.map(record => {
+      // Convert distance to a number
+      const distance = record.get('distance');
+      const distanceValue = distance.toNumber ? distance.toNumber() : Number(distance);
+    
+      return {
+        shop: record.get('p').properties,
+        distance: distanceValue
+      };
+    });
+    if(shops.length==0){
+      return res.status(201).json({
+        message:"No Shop For This  Shops",
+      })
+    }
+    res.status(201).json({
+      message:"All Shops",
+      shops
+    })
+} catch (err) {
+        next(new customError(err.message,501));
+    } finally {
+        await session.close();
+    }
+};
